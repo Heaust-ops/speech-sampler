@@ -6,6 +6,9 @@ use cpal::traits::StreamTrait;
 use cpal::traits::{DeviceTrait, HostTrait};
 use hound;
 use voice_activity_detector::VoiceActivityDetector;
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 fn f32_to_i16(sample: f32) -> i16 {
     let s = sample.clamp(-1.0, 1.0);
@@ -19,12 +22,22 @@ pub struct VAD {
     //
     sample_rate: u32,
     channels: u16,
+    //
+    whisper_state: WhisperState,
 }
 
 impl VAD {
-    pub fn new() -> Self {
+    pub fn new(path_to_whisper: &str) -> Self {
         let output_path = "speechSamplerOut.wav".to_string();
         let accumulator = Arc::new(Mutex::new(Vec::new()));
+
+        let whisper_context =
+            WhisperContext::new_with_params(path_to_whisper, WhisperContextParameters::default())
+                .expect("failed to load whisper context");
+
+        let whisper_state = whisper_context
+            .create_state()
+            .expect("failed to create state");
 
         VAD {
             output_path,
@@ -32,6 +45,7 @@ impl VAD {
             stream: None,
             sample_rate: 44_100,
             channels: 1,
+            whisper_state,
         }
     }
 
@@ -87,6 +101,29 @@ impl VAD {
         }
 
         self.stop();
+
+        self.transcribe(samples);
+    }
+
+    pub fn transcribe(&mut self, samples: Vec<f32>) {
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        self.whisper_state
+            .full(params, &samples[..])
+            .expect("failed to run model");
+
+        // fetch the results
+        let segment = self
+            .whisper_state
+            .get_segment(0)
+            .expect("failed to get segment");
+        println!("transciption: {}", segment);
     }
 
     pub fn start_with_vad(&mut self, vad_threshold: Option<f32>) {
@@ -130,6 +167,8 @@ impl VAD {
                 let data: Vec<f32> = {
                     let gaurd = acc_vad.lock().expect("unlock failed");
                     let len = gaurd.len();
+
+                    // only get the last 512 'cuz that's what this package supports
                     gaurd[len.saturating_sub(512)..].to_vec()
                 };
 
@@ -138,7 +177,18 @@ impl VAD {
 
                 if probability > vad_threshold {
                     match vad_level {
-                        0 => vad_level = 1,
+                        0 => {
+                            vad_level = 1;
+
+                            // clear buffer before 1s past once detection starts to minimize data
+                            // and only have the speech parts in the recording
+                            let mut gaurd = acc_vad.lock().unwrap();
+                            let len = gaurd.len();
+
+                            if len > 16_000 {
+                                gaurd.drain(0..(len - 16_000));
+                            }
+                        }
                         2 => vad_level = 1,
                         _ => {}
                     }
