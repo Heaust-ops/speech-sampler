@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -89,7 +89,9 @@ impl VAD {
         self.stop();
     }
 
-    pub fn start_with_vad(&mut self) {
+    pub fn start_with_vad(&mut self, vad_threshold: Option<f32>) {
+        let vad_threshold = vad_threshold.unwrap_or(0.75);
+
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -111,12 +113,18 @@ impl VAD {
         let acc_vad = Arc::clone(&self.accumulator);
 
         let sr = self.sample_rate;
+        let (vad_thread_sender, vad_thread_receiver) = mpsc::channel::<i32>();
+
+        // vad
         thread::spawn(move || {
             let mut vad = VoiceActivityDetector::builder()
                 .sample_rate(sr)
                 .chunk_size(512usize)
                 .build()
                 .expect("failed making vad");
+
+            let mut vad_level = 0; // 0 = not started talking, 1 = talking, 2 = stopped talking
+            // maybe?, 3 yeah definitely stopped talking
 
             loop {
                 let data: Vec<f32> = {
@@ -128,7 +136,30 @@ impl VAD {
                 let l = data.len();
                 let probability = vad.predict(data);
 
-                println!("probability: {}, len: {}", probability, l);
+                if probability > vad_threshold {
+                    match vad_level {
+                        0 => vad_level = 1,
+                        2 => vad_level = 1,
+                        _ => {}
+                    }
+                }
+
+                if probability < vad_threshold {
+                    match vad_level {
+                        1 => vad_level = 2,
+                        2 => vad_level = 3,
+                        _ => {}
+                    }
+                }
+
+                println!(
+                    "probability: {}, vad_level: {}, len: {}",
+                    probability, vad_level, l
+                );
+
+                if vad_level == 3 {
+                    vad_thread_sender.send(1).expect("error sending vad stop");
+                }
 
                 thread::sleep(Duration::from_secs(1));
             }
@@ -162,6 +193,9 @@ impl VAD {
                 eprintln!("error making stream: {}", err);
             }
         }
+
+        vad_thread_receiver.recv().unwrap();
+        self.save();
     }
 
     pub fn start(&mut self) {
