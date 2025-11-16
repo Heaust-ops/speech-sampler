@@ -175,31 +175,23 @@ impl VAD {
             // maybe?, 3 yeah definitely stopped talking
 
             loop {
+                let l: usize;
+
                 let data: Vec<f32> = {
                     let gaurd = acc_vad.lock().expect("unlock failed");
                     let len = gaurd.len();
+
+                    l = len;
 
                     // only get the last 512 'cuz that's what this package supports
                     gaurd[len.saturating_sub(512)..].to_vec()
                 };
 
-                let l = data.len();
                 let probability = vad.predict(data);
 
                 if probability > vad_threshold {
                     match vad_level {
-                        0 => {
-                            vad_level = 1;
-
-                            // clear buffer before 1s past once detection starts to minimize data
-                            // and only have the speech parts in the recording
-                            let mut gaurd = acc_vad.lock().unwrap();
-                            let len = gaurd.len();
-
-                            if len > 16_000 {
-                                gaurd.drain(0..(len - 16_000));
-                            }
-                        }
+                        0 => vad_level = 1,
                         2 => vad_level = 1,
                         _ => {}
                     }
@@ -207,6 +199,18 @@ impl VAD {
 
                 if probability < vad_threshold {
                     match vad_level {
+                        0 => {
+                            // clear buffer before some past once detection starts to minimize data
+                            // and only have the speech parts in the recording
+                            let keep_past_seconds = 5;
+
+                            let mut gaurd = acc_vad.lock().unwrap();
+                            let len = gaurd.len();
+
+                            if len > (sr as usize) * keep_past_seconds {
+                                gaurd.drain(0..(len - (sr as usize) * keep_past_seconds));
+                            }
+                        }
                         1 => vad_level = 2,
                         2 => vad_level = 3,
                         _ => {}
@@ -218,8 +222,10 @@ impl VAD {
                     vad_thread_sender.send(1).expect("error sending vad stop");
                 } else {
                     print!(
-                        "\r\x1b[2Kprobability: {}, vad_level: {}, len: {}",
-                        probability, vad_level, l
+                        "\r\x1b[2Kprobability: {}, vad_level: {}, buffer: {}s",
+                        probability,
+                        vad_level,
+                        l / (sr as usize)
                     );
                     io::stdout().flush().expect("error flushing log line");
                 }
