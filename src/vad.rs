@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -119,11 +120,21 @@ impl VAD {
             .expect("failed to run model");
 
         // fetch the results
-        let segment = self
-            .whisper_state
-            .get_segment(0)
-            .expect("failed to get segment");
-        println!("transciption: {}", segment);
+        let num_segments = self.whisper_state.full_n_segments();
+
+        let mut t = "".to_string();
+
+        for i in 0..num_segments {
+            // fetch the results
+            let segment = self
+                .whisper_state
+                .get_segment(i)
+                .expect("failed to get segment");
+
+            t += &segment.to_string();
+        }
+
+        println!("transciption: {}", t);
     }
 
     pub fn start_with_vad(&mut self, vad_threshold: Option<f32>) {
@@ -202,13 +213,15 @@ impl VAD {
                     }
                 }
 
-                println!(
-                    "probability: {}, vad_level: {}, len: {}",
-                    probability, vad_level, l
-                );
-
                 if vad_level == 3 {
+                    println!();
                     vad_thread_sender.send(1).expect("error sending vad stop");
+                } else {
+                    print!(
+                        "\r\x1b[2Kprobability: {}, vad_level: {}, len: {}",
+                        probability, vad_level, l
+                    );
+                    io::stdout().flush().expect("error flushing log line");
                 }
 
                 thread::sleep(Duration::from_secs(1));
