@@ -1,8 +1,11 @@
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use cpal::traits::StreamTrait;
 use cpal::traits::{DeviceTrait, HostTrait};
 use hound;
+use voice_activity_detector::VoiceActivityDetector;
 
 fn f32_to_i16(sample: f32) -> i16 {
     let s = sample.clamp(-1.0, 1.0);
@@ -84,6 +87,81 @@ impl VAD {
         }
 
         self.stop();
+    }
+
+    pub fn start_with_vad(&mut self) {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .expect("no output device available");
+
+        let mut supported_configs_range = device
+            .supported_input_configs()
+            .expect("error while querying configs");
+        let supported_config = supported_configs_range
+            .next()
+            .expect("no supported config?!")
+            .with_sample_rate(cpal::SampleRate(16_000));
+
+        let acc = Arc::clone(&self.accumulator);
+
+        self.sample_rate = supported_config.sample_rate().0;
+        self.channels = supported_config.channels() as u16;
+
+        let acc_vad = Arc::clone(&self.accumulator);
+
+        let sr = self.sample_rate;
+        thread::spawn(move || {
+            let mut vad = VoiceActivityDetector::builder()
+                .sample_rate(sr)
+                .chunk_size(512usize)
+                .build()
+                .expect("failed making vad");
+
+            loop {
+                let data: Vec<f32> = {
+                    let gaurd = acc_vad.lock().expect("unlock failed");
+                    let len = gaurd.len();
+                    gaurd[len.saturating_sub(512)..].to_vec()
+                };
+
+                let l = data.len();
+                let probability = vad.predict(data);
+
+                println!("probability: {}, len: {}", probability, l);
+
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+
+        let stream = device.build_input_stream(
+            &supported_config.config(),
+            move |data: &[f32], _| {
+                if let Ok(mut gaurd) = acc.lock() {
+                    gaurd.extend_from_slice(data);
+                }
+            },
+            move |err| {
+                eprintln!("an error occurred on the output audio stream: {}", err);
+            },
+            None,
+        );
+
+        match stream {
+            Ok(value) => {
+                let is_play = value.play();
+
+                if is_play.is_err() {
+                    eprintln!("error recording");
+                }
+
+                self.stream = Some(value);
+            }
+
+            Err(err) => {
+                eprintln!("error making stream: {}", err);
+            }
+        }
     }
 
     pub fn start(&mut self) {

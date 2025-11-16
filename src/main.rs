@@ -7,7 +7,7 @@ fn main() {
 
     let mut vad = VAD::new();
     vad.set_path("out.wav".to_string());
-    vad.start();
+    vad.start_with_vad();
 
     println!("recording. press enter to stop");
     let mut s = String::new();
